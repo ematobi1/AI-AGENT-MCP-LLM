@@ -1,4 +1,4 @@
-"""
+﻿"""
 Provider abstraction layer (see architecture doc §3).
 Every agent calls a model through this interface instead of hitting a
 vendor SDK directly, so you can swap models per agent without touching
@@ -9,7 +9,7 @@ Fill in ANTHROPIC_API_KEY / OPENAI_API_KEY etc. in your .env file.
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 import json
 import os
 import time
@@ -30,7 +30,8 @@ class LLMAdapter:
     provider_name: str = "base"
 
     def complete(self, system_prompt: str, user_content: str,
-                 max_tokens: int = 1024) -> AgentResponse:
+                 max_tokens: int = 1024, tools: Optional[list[dict]] = None,
+                 tool_choice: Optional[dict] = None) -> AgentResponse:
         raise NotImplementedError
 
 
@@ -43,14 +44,26 @@ class AnthropicAdapter(LLMAdapter):
         self.model = model
 
     def complete(self, system_prompt: str, user_content: str,
-                 max_tokens: int = 1024) -> AgentResponse:
+                 max_tokens: int = 1024, tools: Optional[list[dict]] = None,
+                 tool_choice: Optional[dict] = None) -> AgentResponse:
+        """tools: e.g. [{"type": "web_search_20250305", "name": "web_search"}]
+        to enable Anthropic's server-side web search. By default Claude decides
+        for itself whether a search is worth doing, which means it can (and
+        will) skip search entirely if it feels confident from training data —
+        pass tool_choice={"type": "any"} to force at least one real tool call
+        instead of trusting the model's judgment on when to search."""
         start = time.time()
-        resp = self.client.messages.create(
+        kwargs = dict(
             model=self.model,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+        resp = self.client.messages.create(**kwargs)
         text = "".join(b.text for b in resp.content if b.type == "text")
         return AgentResponse(
             provider=self.provider_name, model=self.model, content=text,
@@ -67,7 +80,8 @@ class OpenAIAdapter(LLMAdapter):
         self.model = model
 
     def complete(self, system_prompt: str, user_content: str,
-                 max_tokens: int = 1024) -> AgentResponse:
+                 max_tokens: int = 1024, tools: Optional[list[dict]] = None,
+                 tool_choice: Optional[dict] = None) -> AgentResponse:
         start = time.time()
         resp = self.client.chat.completions.create(
             model=self.model,
