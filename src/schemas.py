@@ -24,7 +24,7 @@ class AgentOutputBase(BaseModel):
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
 
 
-## ──────────────────────────────── Orchestrator ────────────────────────────
+# ──────────────────────────────── Orchestrator ────────────────────────────
 
 class OrchestratorRoutingOutput(AgentOutputBase):
     """Orchestrator doesn't do domain work, so it never emits its own
@@ -219,6 +219,45 @@ AGENT_SCHEMA_REGISTRY: dict[str, type[AgentOutputBase]] = {
     "qa_review_agent": QAReviewOutput,
     "memory_context_agent": MemoryContextOutput,
     "security_analyzer": SecurityAnalyzerOutput,
+}
+
+
+# ────────────────────────────── Risk tiers (Phase 5) ──────────────────────
+# Per architecture doc §10 / roadmap Phase 5: medium and high risk agents
+# get reviewed by security_analyzer BEFORE they're allowed to run at all,
+# not just after. Low risk agents keep the existing post-execution-only
+# review (added in earlier phases) -- reviewing every single low-risk
+# action twice would double API cost for negligible safety benefit, since
+# these agents can't take an irreversible or high-stakes action.
+#
+# "high" = can materially affect legal standing, money, or an external
+#          party's inbox/systems if misused.
+# "medium" = produces something a human might act on with real consequences
+#            (code that gets merged, HR policy language) but isn't itself
+#            the irreversible step.
+# "low" = informational, draft-only, or purely internal-facing.
+AGENT_RISK_TIER: dict[str, str] = {
+    "research_agent": "low",
+    "finance_agent": "medium",
+    "legal_agent": "high",
+    "marketing_agent": "low",
+    "sales_agent": "high",              # drafts outreach to real external parties
+    "ops_project_agent": "low",
+    "hr_agent": "medium",
+    "coding_agent": "medium",
+    "data_analytics_agent": "low",
+    "scheduling_agent": "low",
+    "personal_finance_agent": "medium",
+    "health_wellness_agent": "medium",  # not medical advice, but health-adjacent
+    "travel_agent": "low",
+    "learning_tutor_agent": "low",
+    "home_admin_agent": "low",
+    "correspondence_agent": "high",     # drafts messages to real people
+    "writing_editing_agent": "low",
+    "document_agent": "low",
+    "data_visualization_agent": "low",
+    "qa_review_agent": "low",
+    "memory_context_agent": "low",
 }
 
 

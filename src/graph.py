@@ -1,4 +1,4 @@
-﻿"""
+"""
 Wires the orchestrator, all 22 roster agents, and the security analyzer into
 a LangGraph StateGraph (architecture doc §12), with a REAL human approval
 pause (architecture doc Phase 4) -- not just a status label.
@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .state import TaskState, new_task_state
+from .schemas import AGENT_RISK_TIER
 from .agents import (
     orchestrator,
     security_analyzer,
@@ -96,8 +97,14 @@ def orchestrator_node(state: TaskState) -> TaskState:
 
 
 def dispatch_node(state: TaskState) -> TaskState:
-    """Runs every agent the orchestrator selected, in order. After each one:
+    """Runs every agent the orchestrator selected, in order. For each one:
 
+    0. PHASE 5: if the agent is medium/high risk (see schemas.AGENT_RISK_TIER),
+       security_analyzer.review_proposal() runs BEFORE the agent is invoked
+       at all. A "block" verdict here means the agent never runs -- no API
+       cost spent, no output produced. This catches things you want to
+       catch before an attempt is even made (e.g. an embedded instruction
+       in the goal trying to redirect a high-risk agent's behavior).
     1. If the agent's own output has status "needs_approval" (e.g. legal_agent,
        correspondence_agent), execution genuinely PAUSES here via interrupt().
        The caller must resume with Command(resume=True) to approve or
@@ -105,8 +112,9 @@ def dispatch_node(state: TaskState) -> TaskState:
        past this. Rejecting halts the chain immediately.
     2. If the agent's own output has status "blocked", halt immediately --
        a failed result never flows into the next agent.
-    3. Otherwise, security_analyzer reviews the action; if it flags "block",
-       halt immediately too.
+    3. Otherwise, security_analyzer.review() reviews the actual action
+       after the fact (this catches things only visible in real output,
+       like fabricated citations); if it flags "block", halt immediately.
     """
     next_agents = state["context"].get("next_agents", [])
     task_packet = {"goal": state["user_goal"], "context": state["context"]}
@@ -117,6 +125,18 @@ def dispatch_node(state: TaskState) -> TaskState:
         if agent_fn is None:
             state["context"].setdefault("unrouted_agents", []).append(agent_name)
             continue
+
+        risk_tier = AGENT_RISK_TIER.get(agent_name, "low")
+        if risk_tier in ("medium", "high"):
+            proposal_verdict = security_analyzer.review_proposal(state, agent_name, task_packet)
+            if proposal_verdict.get("severity") == "block":
+                state["pending_approvals"].append({
+                    "agent": agent_name,
+                    "reason": f"Pre-execution review blocked this request before "
+                              f"{agent_name} ran: {proposal_verdict.get('recommendation')}",
+                    "findings": proposal_verdict.get("findings", []),
+                })
+                break  # agent_fn is never called -- no cost spent, no output produced
 
         result = agent_fn(state, task_packet)
         state["context"]["agent_results"][agent_name] = result
@@ -139,7 +159,7 @@ def dispatch_node(state: TaskState) -> TaskState:
                 })
                 break
             # Approved: fall through to the normal blocked/security checks
-            # below -- approval does not skip the security review.
+            # below -- approval does not skip the post-execution review.
 
         if result.get("status") == "blocked":
             state["pending_approvals"].append({
