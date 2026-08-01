@@ -1,18 +1,24 @@
 ﻿"""
 Wires the orchestrator, all 22 roster agents, and the security analyzer into
-a LangGraph StateGraph (architecture doc §12).
+a LangGraph StateGraph (architecture doc §12), with a REAL human approval
+pause (architecture doc Phase 4) -- not just a status label.
 
-Unlike the earlier 3-node version, this dispatches dynamically: the
-orchestrator decides which agent(s) a task needs from the full roster, and
-dispatch_node runs each one in turn. The chain halts immediately if EITHER
-(a) an agent itself reports status "blocked" (e.g. its own output failed
-schema validation), so a broken result never silently flows into the next
-agent, OR (b) the security_analyzer flags the action with severity "block" --
-giving it real veto power per architecture doc §10.
+Previously, an agent returning status="needs_approval" (e.g. legal_agent,
+correspondence_agent) didn't actually stop anything -- the chain just kept
+going. That defeats the purpose of the status. Now, dispatch_node calls
+LangGraph's interrupt() the moment that happens: execution genuinely
+pauses, state is checkpointed, and the caller must explicitly approve or
+reject before anything continues.
 
 pip install langgraph
 """
 from langgraph.graph import StateGraph, END
+from langgraph.types import Command, interrupt
+
+try:
+    from langgraph.checkpoint.memory import InMemorySaver
+except ImportError:  # older langgraph versions used this name
+    from langgraph.checkpoint.memory import MemorySaver as InMemorySaver
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -91,9 +97,15 @@ def orchestrator_node(state: TaskState) -> TaskState:
 
 def dispatch_node(state: TaskState) -> TaskState:
     """Runs every agent the orchestrator selected, in order. After each one:
-    1. If the agent's own output has status "blocked", halt immediately --
-       a failed result never flows into the next agent in the chain.
-    2. Otherwise, security_analyzer reviews the action; if it flags "block",
+
+    1. If the agent's own output has status "needs_approval" (e.g. legal_agent,
+       correspondence_agent), execution genuinely PAUSES here via interrupt().
+       The caller must resume with Command(resume=True) to approve or
+       Command(resume=False) to reject -- there is no way to silently skip
+       past this. Rejecting halts the chain immediately.
+    2. If the agent's own output has status "blocked", halt immediately --
+       a failed result never flows into the next agent.
+    3. Otherwise, security_analyzer reviews the action; if it flags "block",
        halt immediately too.
     """
     next_agents = state["context"].get("next_agents", [])
@@ -108,6 +120,26 @@ def dispatch_node(state: TaskState) -> TaskState:
 
         result = agent_fn(state, task_packet)
         state["context"]["agent_results"][agent_name] = result
+
+        if result.get("status") == "needs_approval":
+            approved = interrupt({
+                "type": "approval_required",
+                "agent": agent_name,
+                "output": result,
+                "message": f"{agent_name} requires human approval before the "
+                           f"pipeline can continue. Review the output above "
+                           f"and resume with Command(resume=True) to approve "
+                           f"or Command(resume=False) to reject.",
+            })
+            if not approved:
+                state["pending_approvals"].append({
+                    "agent": agent_name,
+                    "reason": f"Human rejected {agent_name}'s output during approval review.",
+                    "findings": [],
+                })
+                break
+            # Approved: fall through to the normal blocked/security checks
+            # below -- approval does not skip the security review.
 
         if result.get("status") == "blocked":
             state["pending_approvals"].append({
@@ -160,6 +192,13 @@ def route_after_dispatch(state: TaskState) -> str:
 
 
 def build_graph():
+    """A checkpointer is REQUIRED for interrupt() to work -- without one,
+    LangGraph has nowhere to persist state across the pause. InMemorySaver
+    is fine for a single process's lifetime (testing, a CLI session); if
+    the process restarts mid-approval, that state is lost. For a real
+    deployment where approvals might span a restart, swap in
+    langgraph.checkpoint.sqlite.SqliteSaver (or Postgres) instead -- same
+    interface, durable storage."""
     graph = StateGraph(TaskState)
 
     graph.add_node("orchestrator", orchestrator_node)
@@ -177,16 +216,44 @@ def build_graph():
     graph.add_edge("synthesis", END)
     graph.add_edge("blocked", END)
 
-    return graph.compile()
+    checkpointer = InMemorySaver()
+    return graph.compile(checkpointer=checkpointer)
+
+
+def run_with_cli_approval(app, initial_state, thread_id: str):
+    """Runs the graph and handles any approval interrupt with a real CLI
+    prompt -- this is the reference implementation of the human side of the
+    pause/resume loop. A production system would replace input() with
+    whatever surfaces the pending approval to an actual reviewer (a UI, a
+    Slack message, an email) and whatever captures their response -- the
+    interrupt()/Command(resume=...) mechanics underneath stay the same."""
+    config = {"configurable": {"thread_id": thread_id}}
+    result = app.invoke(initial_state, config=config)
+
+    while "__interrupt__" in result:
+        payload = result["__interrupt__"][0].value
+        print("\n" + "=" * 60)
+        print("APPROVAL REQUIRED")
+        print("=" * 60)
+        print(f"Agent: {payload.get('agent')}")
+        print(f"Output: {payload.get('output')}")
+        print(f"\n{payload.get('message')}")
+        answer = input("\nApprove? [y/N]: ").strip().lower()
+        approved = answer == "y"
+        result = app.invoke(Command(resume=approved), config=config)
+
+    return result
 
 
 if __name__ == "__main__":
+    import uuid
+
     app = build_graph()
     state = new_task_state(
         user_goal="Summarize recent developments in solid-state batteries",
         domain_tags=[],
     )
-    result = app.invoke(state)
+    result = run_with_cli_approval(app, state, thread_id=str(uuid.uuid4()))
     print(result["final_output"])
     print("\n--- agent log ---")
     for entry in result["agent_log"]:
