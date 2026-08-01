@@ -1,5 +1,4 @@
-Set-Content -Path test_keys.py -Value @'
-import os
+﻿import os
 from dotenv import load_dotenv
 from openai import OpenAI
 import anthropic
@@ -18,20 +17,19 @@ if openai_key:
     try:
         client = OpenAI(api_key=openai_key)
         response = client.models.list()
-        print("✅ OpenAI API Key is VALID and working!\n")
+        print("OpenAI API Key is VALID and working!\n")
     except Exception as e:
-        print(f"❌ OpenAI API Key failed: {e}\n")
+        print(f"OpenAI API Key test FAILED: {e}\n")
 
 if anthropic_key:
     print("Testing Anthropic API...")
     try:
         client = anthropic.Anthropic(api_key=anthropic_key)
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model="claude-sonnet-4-6",
             max_tokens=10,
-            messages=[{"role": "user", "content": "Hi"}]
+            messages=[{"role": "user", "content": "hi"}],
         )
-        print("✅ Anthropic API Key is VALID and working!\n")
+        print("Anthropic API Key is VALID and working!\n")
     except Exception as e:
-        print(f"❌ Anthropic API Key failed: {e}\n")
-'@
+        print(f"Anthropic API Key test FAILED: {e}\n")

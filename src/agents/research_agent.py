@@ -32,7 +32,7 @@ def run(state: TaskState, task_packet: dict, provider: str = "anthropic") -> dic
     resp = adapter.complete(
         system_prompt=SYSTEM_PROMPT,
         user_content=f"Task: {task_packet.get('goal')}\nContext: {task_packet.get('context', {})}",
-        max_tokens=4096,
+        max_tokens=8192,
         tools=WEB_SEARCH_TOOL if provider == "anthropic" else None,
         tool_choice=FORCE_TOOL_USE if provider == "anthropic" else None,
     )

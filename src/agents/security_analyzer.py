@@ -17,11 +17,9 @@ Return JSON:
 """
 
 
-def review(state: TaskState, last_action: dict, provider: str = "anthropic") -> dict:
+def review(state: TaskState, last_action: dict, provider: str = "openai") -> dict:
     """Deliberately defaults to a different provider than most domain
-    agents (see §10.4) so one model's blind spot doesn't blind its reviewer.
-    Currently pinned to anthropic as a workaround for an unresolved OpenAI
-    billing/quota issue -- switch back to "openai" once that's fixed."""
+    agents (see §10.4) so one model's blind spot doesn't blind its reviewer."""
     adapter = get_adapter(provider)
     resp = adapter.complete(
         system_prompt=SYSTEM_PROMPT,

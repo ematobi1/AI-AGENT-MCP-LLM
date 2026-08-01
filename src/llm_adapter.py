@@ -49,7 +49,7 @@ class AnthropicAdapter(LLMAdapter):
         """tools: e.g. [{"type": "web_search_20250305", "name": "web_search"}]
         to enable Anthropic's server-side web search. By default Claude decides
         for itself whether a search is worth doing, which means it can (and
-        will) skip search entirely if it feels confident from training data —
+        will) skip search entirely if it feels confident from training data --
         pass tool_choice={"type": "any"} to force at least one real tool call
         instead of trusting the model's judgment on when to search."""
         start = time.time()
@@ -85,7 +85,7 @@ class OpenAIAdapter(LLMAdapter):
         start = time.time()
         resp = self.client.chat.completions.create(
             model=self.model,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -112,13 +112,35 @@ def get_adapter(provider: str, model: str | None = None) -> LLMAdapter:
 
 def parse_json_response(text: str) -> dict:
     """Every agent is instructed to return JSON matching a schema.
-    Strip markdown fences defensively before parsing."""
+    Strips markdown fences (leading AND trailing -- models sometimes add a
+    stray closing fence with no matching opening one) and, if that still
+    doesn't parse, falls back to extracting the first balanced {...} block
+    from the text rather than giving up on any surrounding junk."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
+        first_newline = cleaned.find("\n")
+        cleaned = cleaned[first_newline + 1:] if first_newline != -1 else cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        return {"status": "blocked", "error": "unparseable_response", "raw": text}
+        pass
+
+    start = cleaned.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(cleaned)):
+            if cleaned[i] == "{":
+                depth += 1
+            elif cleaned[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+
+    return {"status": "blocked", "error": "unparseable_response", "raw": text}
