@@ -51,6 +51,6 @@ def route(state: TaskState, provider: str = "anthropic") -> dict:
         decision = {"status": "blocked", "error": "schema_validation_failed", "detail": str(e),
                     "next_agents": [], "risk_level": "high", "reasoning": "routing decision failed validation"}
 
-    log_agent_action(state, agent="orchestrator", provider=resp.provider,
+    log_agent_action(state, agent="orchestrator", provider=resp.provider, response=resp,
                       action="route", status=decision.get("status", "blocked"), output=decision)
     return decision

@@ -21,7 +21,7 @@ def run(state: TaskState, task_packet: dict, provider: str = "anthropic") -> dic
     except Exception as e:
         result = {"status": "blocked", "error": "schema_validation_failed", "detail": str(e)}
 
-    log_agent_action(state, agent="memory_context_agent", provider=resp.provider,
+    log_agent_action(state, agent="memory_context_agent", provider=resp.provider, response=resp,
                       action="recall", status=result.get("status", "blocked"),
                       output=result)
     return result

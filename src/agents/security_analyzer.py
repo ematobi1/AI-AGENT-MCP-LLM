@@ -74,7 +74,7 @@ def review(state: TaskState, last_action: dict, provider: str = "anthropic") -> 
         result = {"status": "blocked", "severity": "block", "findings": [],
                   "recommendation": f"schema_validation_failed: {e}"}
 
-    log_agent_action(state, agent="security_analyzer", provider=resp.provider,
+    log_agent_action(state, agent="security_analyzer", provider=resp.provider, response=resp,
                       action="review", status=result.get("status", "blocked"), output=result)
     if result.get("severity") == "block":
         state["security_findings"].extend(result.get("findings", []))
@@ -101,7 +101,7 @@ def review_proposal(state: TaskState, agent_name: str, task_packet: dict, provid
         result = {"status": "blocked", "severity": "block", "findings": [],
                   "recommendation": f"schema_validation_failed: {e}"}
 
-    log_agent_action(state, agent="security_analyzer", provider=resp.provider,
+    log_agent_action(state, agent="security_analyzer", provider=resp.provider, response=resp,
                       action="review_proposal", status=result.get("status", "blocked"), output=result)
     if result.get("severity") == "block":
         state["security_findings"].extend(result.get("findings", []))

@@ -14,6 +14,7 @@ pip install langgraph
 """
 from langgraph.graph import StateGraph, END
 from langgraph.types import Command, interrupt
+import os
 
 try:
     from langgraph.checkpoint.memory import InMemorySaver
@@ -25,6 +26,7 @@ load_dotenv()
 
 from .state import TaskState, new_task_state
 from .schemas import AGENT_RISK_TIER
+from . import persistence
 from .agents import (
     orchestrator,
     security_analyzer,
@@ -130,6 +132,7 @@ def dispatch_node(state: TaskState) -> TaskState:
         if risk_tier in ("medium", "high"):
             proposal_verdict = security_analyzer.review_proposal(state, agent_name, task_packet)
             if proposal_verdict.get("severity") == "block":
+                persistence.alert_on_security_block(agent_name, proposal_verdict, stage="pre-execution")
                 state["pending_approvals"].append({
                     "agent": agent_name,
                     "reason": f"Pre-execution review blocked this request before "
@@ -172,6 +175,7 @@ def dispatch_node(state: TaskState) -> TaskState:
         last_action = state["agent_log"][-1] if state["agent_log"] else {}
         verdict = security_analyzer.review(state, last_action)
         if verdict.get("severity") == "block":
+            persistence.alert_on_security_block(agent_name, verdict, stage="post-execution")
             state["pending_approvals"].append({
                 "agent": agent_name,
                 "reason": verdict.get("recommendation"),
@@ -246,7 +250,11 @@ def run_with_cli_approval(app, initial_state, thread_id: str):
     pause/resume loop. A production system would replace input() with
     whatever surfaces the pending approval to an actual reviewer (a UI, a
     Slack message, an email) and whatever captures their response -- the
-    interrupt()/Command(resume=...) mechanics underneath stay the same."""
+    interrupt()/Command(resume=...) mechanics underneath stay the same.
+
+    Also persists the full run to agent_runs.db (Phase 7) and prints a
+    one-line cost summary once the run concludes, whether it finished
+    cleanly or stopped blocked."""
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(initial_state, config=config)
 
@@ -261,6 +269,13 @@ def run_with_cli_approval(app, initial_state, thread_id: str):
         answer = input("\nApprove? [y/N]: ").strip().lower()
         approved = answer == "y"
         result = app.invoke(Command(resume=approved), config=config)
+
+    persistence.persist_task_run(result)
+
+    total_cost = sum(e.get("cost_usd") or 0 for e in result["agent_log"])
+    total_calls = len(result["agent_log"])
+    print(f"\n[cost] {total_calls} model call(s), ${total_cost:.6f} total "
+          f"(saved to {os.path.basename(persistence.DB_PATH)}, task_id={result['task_id']})")
 
     return result
 

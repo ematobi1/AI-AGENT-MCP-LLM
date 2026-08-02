@@ -1,4 +1,4 @@
-﻿"""
+"""
 Structural sanity checks -- NO live API calls, no cost, runs in under a
 second. Catches the exact class of bug that ate the most debugging time
 during development: a file that doesn't import cleanly, a registry key
@@ -110,6 +110,23 @@ def test_correspondence_agent_never_send_ready_by_default():
     assert result.send_ready is False, "CorrespondenceOutput defaulted to send_ready=True -- safety default was removed!"
 
 
+def test_all_agents_pass_response_for_cost_tracking():
+    """Phase 7: every agent's log_agent_action() call must pass
+    response=resp so token usage and cost get recorded. This is a
+    structural/source-text check rather than a runtime one, since it's
+    checking a calling convention, not behavior -- catches a future edit
+    that copies an agent file without preserving this."""
+    agents_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "agents")
+    missing = []
+    for fname in sorted(os.listdir(agents_dir)):
+        if not fname.endswith(".py") or fname == "__init__.py":
+            continue
+        content = open(os.path.join(agents_dir, fname)).read()
+        if "log_agent_action(state" in content and "response=resp" not in content:
+            missing.append(fname)
+    assert not missing, f"Agent files calling log_agent_action without response=resp (breaks cost tracking): {missing}"
+
+
 if __name__ == "__main__":
     tests = [
         test_all_agent_modules_import_cleanly,
@@ -119,6 +136,7 @@ if __name__ == "__main__":
         test_schema_validation_rejects_missing_required_field,
         test_legal_agent_schema_cannot_self_complete,
         test_correspondence_agent_never_send_ready_by_default,
+        test_all_agents_pass_response_for_cost_tracking,
     ]
     passed, failed = 0, 0
     for t in tests:

@@ -3,9 +3,13 @@ Shared task state ("the blackboard").
 Every agent reads from and writes to this structure instead of passing
 raw conversation history around. This is the single source of truth
 for a task's progress, and what the security analyzer audits.
+
+Phase 7 addition: log_agent_action now records token usage, cost, and
+latency per call (when the caller passes the raw AgentResponse), which
+persistence.py aggregates into per-task and per-agent cost reports.
 """
 from __future__ import annotations
-from typing import Literal, Optional, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 from datetime import datetime, timezone
 import uuid
 
@@ -21,6 +25,11 @@ class AgentLogEntry(TypedDict):
     status: Status
     output: dict
     timestamp: str
+    model: Optional[str]
+    input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    cost_usd: Optional[float]
+    latency_ms: Optional[float]
 
 
 class SecurityFinding(TypedDict):
@@ -56,7 +65,13 @@ def new_task_state(user_goal: str, domain_tags: list[str], risk_level: str = "lo
 
 
 def log_agent_action(state: TaskState, agent: str, provider: str, action: str,
-                      status: Status, output: dict) -> None:
+                      status: Status, output: dict, response: Any = None) -> None:
+    """response: pass the raw AgentResponse from llm_adapter.py's complete()
+    call when available (every agent already has it in scope at the call
+    site) to capture token usage, cost, and latency. Fully optional and
+    backward compatible -- omitting it just logs None for those fields,
+    exactly like before Phase 7. Uses getattr() defensively rather than a
+    hard type import, so this file stays decoupled from llm_adapter.py."""
     state["agent_log"].append({
         "agent": agent,
         "provider": provider,
@@ -64,4 +79,9 @@ def log_agent_action(state: TaskState, agent: str, provider: str, action: str,
         "status": status,
         "output": output,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": getattr(response, "model", None),
+        "input_tokens": getattr(response, "input_tokens", None),
+        "output_tokens": getattr(response, "output_tokens", None),
+        "cost_usd": getattr(response, "cost_usd", None),
+        "latency_ms": getattr(response, "latency_ms", None),
     })

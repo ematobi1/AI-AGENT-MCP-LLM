@@ -1,4 +1,4 @@
-﻿"""
+"""
 Provider abstraction layer (see architecture doc §3).
 Every agent calls a model through this interface instead of hitting a
 vendor SDK directly, so you can swap models per agent without touching
@@ -6,6 +6,13 @@ agent logic, and get a consistent audit trail of which model produced
 which output.
 
 Fill in ANTHROPIC_API_KEY / OPENAI_API_KEY etc. in your .env file.
+
+Phase 7 addition: every AgentResponse now carries token counts and a
+computed cost_usd, using MODEL_PRICING below. Pricing changes over time --
+verify current rates at https://docs.claude.com (Anthropic) and
+https://platform.openai.com/docs/pricing (OpenAI) periodically and update
+MODEL_PRICING if a rate drifts. An unrecognized model logs token counts
+but cost_usd stays None rather than silently guessing a wrong number.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -15,6 +22,29 @@ import os
 import time
 
 
+# USD per 1M tokens: (input_rate, output_rate). Confirmed against current
+# vendor pricing pages as of Aug 2026 -- re-verify periodically, pricing
+# is not static.
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
+    # "gpt-5" was OpenAI's original Aug 2025 rate ($0.625/$5.00 per MTok);
+    # OpenAI has since delisted it from their main pricing page in favor of
+    # the 5.4/5.5 family, but the model ID may still resolve on an existing
+    # account at its original rate. Verify against your actual invoice/the
+    # current pricing page if this stops matching what you're billed.
+    "gpt-5": (0.625, 5.00),
+}
+
+
+def calculate_cost_usd(model: str, input_tokens: Optional[int], output_tokens: Optional[int]) -> Optional[float]:
+    if model not in MODEL_PRICING or input_tokens is None or output_tokens is None:
+        return None
+    input_rate, output_rate = MODEL_PRICING[model]
+    return round((input_tokens / 1_000_000) * input_rate + (output_tokens / 1_000_000) * output_rate, 6)
+
+
 @dataclass
 class AgentResponse:
     provider: str
@@ -22,6 +52,9 @@ class AgentResponse:
     content: str
     raw: Any
     latency_ms: float
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
 
 
 class LLMAdapter:
@@ -65,9 +98,15 @@ class AnthropicAdapter(LLMAdapter):
             kwargs["tool_choice"] = tool_choice
         resp = self.client.messages.create(**kwargs)
         text = "".join(b.text for b in resp.content if b.type == "text")
+
+        input_tokens = getattr(resp.usage, "input_tokens", None) if hasattr(resp, "usage") else None
+        output_tokens = getattr(resp.usage, "output_tokens", None) if hasattr(resp, "usage") else None
+
         return AgentResponse(
             provider=self.provider_name, model=self.model, content=text,
             raw=resp, latency_ms=(time.time() - start) * 1000,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cost_usd=calculate_cost_usd(self.model, input_tokens, output_tokens),
         )
 
 
@@ -92,9 +131,15 @@ class OpenAIAdapter(LLMAdapter):
             ],
         )
         text = resp.choices[0].message.content or ""
+
+        input_tokens = getattr(resp.usage, "prompt_tokens", None) if hasattr(resp, "usage") else None
+        output_tokens = getattr(resp.usage, "completion_tokens", None) if hasattr(resp, "usage") else None
+
         return AgentResponse(
             provider=self.provider_name, model=self.model, content=text,
             raw=resp, latency_ms=(time.time() - start) * 1000,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cost_usd=calculate_cost_usd(self.model, input_tokens, output_tokens),
         )
 
 
