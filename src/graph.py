@@ -27,6 +27,7 @@ load_dotenv()
 from .state import TaskState, new_task_state
 from .schemas import AGENT_RISK_TIER
 from . import persistence
+from . import config
 from .agents import (
     orchestrator,
     security_analyzer,
@@ -91,6 +92,21 @@ _SUMMARY_FIELDS = (
 
 
 def orchestrator_node(state: TaskState) -> TaskState:
+    """PHASE 8: checks the kill switch before doing anything else -- this
+    is the earliest possible gate, before even the orchestrator's own API
+    call happens, so an active kill switch costs nothing and produces no
+    output at all."""
+    if config.is_kill_switch_active():
+        state["pending_approvals"].append({
+            "agent": "system",
+            "reason": "Kill switch is active (AGENT_SYSTEM_DISABLED=1 or "
+                      ".KILL_SWITCH file present). No agent will run until "
+                      "it's cleared.",
+            "findings": [],
+        })
+        state["context"]["next_agents"] = []
+        return state
+
     decision = orchestrator.route(state)
     state["domain_tags"] = decision.get("domain_tags", [])
     state["risk_level"] = decision.get("risk_level", "low")
@@ -121,8 +137,13 @@ def dispatch_node(state: TaskState) -> TaskState:
     next_agents = state["context"].get("next_agents", [])
     task_packet = {"goal": state["user_goal"], "context": state["context"]}
     state["context"].setdefault("agent_results", {})
+    disabled_agents = config.get_disabled_agents()
 
     for agent_name in next_agents:
+        if agent_name in disabled_agents:
+            state["context"].setdefault("disabled_agents_skipped", []).append(agent_name)
+            continue
+
         agent_fn = AGENT_REGISTRY.get(agent_name)
         if agent_fn is None:
             state["context"].setdefault("unrouted_agents", []).append(agent_name)
@@ -255,8 +276,9 @@ def run_with_cli_approval(app, initial_state, thread_id: str):
     Also persists the full run to agent_runs.db (Phase 7) and prints a
     one-line cost summary once the run concludes, whether it finished
     cleanly or stopped blocked."""
-    config = {"configurable": {"thread_id": thread_id}}
-    result = app.invoke(initial_state, config=config)
+    run_config = {"configurable": {"thread_id": thread_id}}  # named to avoid
+    # shadowing the `config` module (src/config.py) imported at module level
+    result = app.invoke(initial_state, config=run_config)
 
     while "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
@@ -268,7 +290,7 @@ def run_with_cli_approval(app, initial_state, thread_id: str):
         print(f"\n{payload.get('message')}")
         answer = input("\nApprove? [y/N]: ").strip().lower()
         approved = answer == "y"
-        result = app.invoke(Command(resume=approved), config=config)
+        result = app.invoke(Command(resume=approved), config=run_config)
 
     persistence.persist_task_run(result)
 
@@ -282,6 +304,10 @@ def run_with_cli_approval(app, initial_state, thread_id: str):
 
 if __name__ == "__main__":
     import uuid
+
+    config.validate_startup_config()  # PHASE 8: fail fast with a clear
+    # message if a required API key is missing, rather than a confusing
+    # traceback several agent calls deep.
 
     app = build_graph()
     state = new_task_state(

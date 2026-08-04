@@ -164,6 +164,102 @@ def test_agents_handling_untrusted_content_warn_against_injection():
     )
 
 
+def test_kill_switch_prevents_all_dispatch_with_zero_api_cost():
+    """PHASE 8: an active kill switch must stop orchestrator_node before it
+    ever calls the LLM at all -- not just after routing. This test confirms
+    orchestrator.route() is never invoked when the switch is active, which
+    is the whole point: zero cost, zero output, immediate and total halt."""
+    orchestrator_was_called = {"value": False}
+
+    def fake_route(state, provider="anthropic"):
+        orchestrator_was_called["value"] = True
+        return {"status": "complete", "next_agents": ["research_agent"],
+                "risk_level": "low", "reasoning": "should never run"}
+
+    state = _fresh_state()
+
+    with patch.object(graph_module.config, "is_kill_switch_active", return_value=True), \
+         patch.object(graph_module.orchestrator, "route", fake_route):
+        result = graph_module.orchestrator_node(state)
+
+    assert not orchestrator_was_called["value"], \
+        "orchestrator.route() was called even though the kill switch was active -- it must never run"
+    assert result["context"]["next_agents"] == [], \
+        "Kill switch was active but next_agents was not cleared"
+    assert len(result["pending_approvals"]) == 1
+    assert result["pending_approvals"][0]["agent"] == "system"
+
+
+def test_disabled_agent_is_skipped_not_executed():
+    """PHASE 8: an agent listed in DISABLED_AGENTS must be skipped entirely
+    -- never invoked, never counted as unrouted (that's a different failure
+    mode meaning 'this agent doesn't exist'; this one means 'it exists but
+    an operator explicitly turned it off')."""
+    agent_was_called = {"value": False}
+
+    def fake_agent(state, task_packet):
+        agent_was_called["value"] = True
+        return {"status": "complete", "summary": "should never run"}
+
+    state = _fresh_state()
+    state["context"]["next_agents"] = ["fake_disabled_agent"]
+
+    with patch.dict(graph_module.AGENT_REGISTRY, {"fake_disabled_agent": fake_agent}), \
+         patch.object(graph_module.config, "get_disabled_agents", return_value={"fake_disabled_agent"}):
+        result = graph_module.dispatch_node(state)
+
+    assert not agent_was_called["value"], \
+        "Disabled agent was invoked anyway -- DISABLED_AGENTS filter did not work"
+    assert result["context"].get("disabled_agents_skipped") == ["fake_disabled_agent"]
+    assert result["context"].get("unrouted_agents") is None, \
+        "A disabled agent got recorded as unrouted -- these are different failure modes and should stay distinct"
+
+
+def test_every_medium_high_risk_real_agent_gets_preexecution_review():
+    """Roadmap Phase 8 explicitly calls for re-running the Phase 5
+    adversarial suite 'against the expanded roster' -- this confirms EVERY
+    real medium/high risk agent currently in AGENT_RISK_TIER actually
+    triggers security_analyzer.review_proposal(), not just the one mocked
+    agent the Phase 5 test used. Catches a future agent being added at
+    medium/high risk without actually being wired into the pre-execution
+    check path (which would happen automatically today since the check is
+    keyed off AGENT_RISK_TIER, not a hardcoded list -- this test is what
+    proves that claim rather than assuming it)."""
+    from src.schemas import AGENT_RISK_TIER
+
+    medium_high_agents = [name for name, tier in AGENT_RISK_TIER.items() if tier in ("medium", "high")]
+    assert medium_high_agents, "No medium/high risk agents found in AGENT_RISK_TIER -- test setup is broken"
+
+    reviewed_agents = []
+
+    def fake_review_proposal(state, agent_name, task_packet, provider="anthropic"):
+        reviewed_agents.append(agent_name)
+        return {"status": "complete", "severity": "informational", "findings": [], "recommendation": "ok"}
+
+    def fake_review(state, last_action, provider="anthropic"):
+        return {"status": "complete", "severity": "informational", "findings": [], "recommendation": "ok"}
+
+    def make_fake_agent():
+        def fake_agent(state, task_packet):
+            return {"status": "complete", "summary": "test"}
+        return fake_agent
+
+    fake_registry_entries = {name: make_fake_agent() for name in medium_high_agents}
+
+    state = _fresh_state()
+    state["context"]["next_agents"] = medium_high_agents
+
+    with patch.dict(graph_module.AGENT_REGISTRY, fake_registry_entries), \
+         patch.object(graph_module.security_analyzer, "review_proposal", fake_review_proposal), \
+         patch.object(graph_module.security_analyzer, "review", fake_review):
+        graph_module.dispatch_node(state)
+
+    assert set(reviewed_agents) == set(medium_high_agents), (
+        f"Not every medium/high risk agent triggered pre-execution review. "
+        f"Expected: {sorted(medium_high_agents)}, got: {sorted(reviewed_agents)}"
+    )
+
+
 if __name__ == "__main__":
     tests = [
         test_unauthorized_agent_never_executes,
@@ -171,6 +267,9 @@ if __name__ == "__main__":
         test_post_execution_security_block_halts_chain,
         test_pre_execution_security_block_prevents_agent_from_running,
         test_agents_handling_untrusted_content_warn_against_injection,
+        test_kill_switch_prevents_all_dispatch_with_zero_api_cost,
+        test_disabled_agent_is_skipped_not_executed,
+        test_every_medium_high_risk_real_agent_gets_preexecution_review,
     ]
     passed, failed = 0, 0
     for t in tests:

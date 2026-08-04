@@ -1,4 +1,14 @@
-"""Coding agent (architecture doc §5.1, business domain)."""
+"""Coding agent (architecture doc §5.1, business domain).
+
+PHASE 8 NOTE (execution sandboxing): this agent produces a code diff as
+TEXT ONLY -- it never calls exec(), subprocess, eval(), or any other
+execution path, and never will as currently designed. There is
+consequently no code-execution sandboxing gap to close today. If a future
+version adds an actual "run this code and report the result" capability,
+that execution MUST happen in an isolated environment (a disposable Docker
+container, gVisor, Firecracker, or equivalent) with no direct network path
+to production credentials or the host filesystem -- do not add real
+execution to this agent without that isolation in place first."""
 from ..llm_adapter import get_adapter, parse_json_response
 from ..state import TaskState, log_agent_action
 from ..schemas import validate_agent_output
